@@ -6,6 +6,7 @@ The **TOTP Secrets Adapter** is a short script written entirely in Python to hel
 
 - reads exported TOTP secrets 
 - stores those TOTP secrets secretly by calling the interface of a target authenticator
+- saves time, is less error-prone and more secure, as no manual copying/pasting of secrets is required
 
 Supported TOTP secrets exctractors and supported authenticators are listed in section Software.
 
