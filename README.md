@@ -2,17 +2,16 @@
 
 ## What the project is for
 
-The **TOTP Secrets Adapter** is a short script written entirely in Python to
-help you to setup an authenticator environment on your (trusted) personal computer (notebook, laptop, desktop)
-to generate the same time-based one-time passwords (TOTP) as the authenticator on your smartphone does. 
+The **TOTP Secrets Adapter** is a short script written entirely in Python to help you to setup an authenticator environment on your (trusted) personal computer (notebook, laptop, desktop) to generate the same time-based one-time passwords (TOTP) as the authenticator on your smartphone does. Actually it
 
-Actually it
 - reads exported TOTP secrets 
 - stores those TOTP secrets secretly by calling the interface of a target authenticator
 
 Supported TOTP secrets exctractors and supported authenticators are listed in section Software.
 
 ### Architecture
+
+![totpsa](https://github.com/user-attachments/assets/92f8b39d-21d5-4326-8a21-277858a0079c)
 
 
 ### Description of the architecture
