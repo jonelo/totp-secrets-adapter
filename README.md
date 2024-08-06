@@ -12,7 +12,7 @@ Supported TOTP secrets exctractors and supported authenticators are listed in se
 
 ### Architecture
 
-![totpsa](https://github.com/user-attachments/assets/92f8b39d-21d5-4326-8a21-277858a0079c)
+![totp-secrets-adapter-architecture](https://github.com/user-attachments/assets/bdac839a-3021-4fb2-9b69-4d2a3a35e8a9)
 
 
 ### Description of the architecture
