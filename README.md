@@ -56,7 +56,7 @@ The .json files are being read by the *TOTP secrets adapter* (this project) whic
 
 | Authenticator                                                               | Written in | License | Supported interfaces for the import |  
 |-----------------------------------------------------------------------------|------------|---------|-------------------------------------|
-| [Dave's authenticator](https://github.com/JeNeSuisPasDave/authenticator)    | Pyhton     | MIT     | CLI + stdin                         |
+| [Dave's authenticator](https://github.com/JeNeSuisPasDave/authenticator)    | Python     | MIT     | CLI + stdin                         |
 
 
 ## How to install, export, import and use it?
@@ -65,7 +65,7 @@ The .json files are being read by the *TOTP secrets adapter* (this project) whic
 
 #### Python
 
-To run the script you need Python. You can get it from https://phyton.org
+To run the script you need Python. You can get it from https://python.org
 
 #### Roland's extract_otp_secrets 
 
