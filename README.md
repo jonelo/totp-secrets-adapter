@@ -24,7 +24,7 @@ Supported sources and targets are listed in the section *Software*.
 
 ### Architecture
 
-![totp-secrets-adapter-architecture](https://github.com/user-attachments/assets/bdac839a-3021-4fb2-9b69-4d2a3a35e8a9)
+<img src="src/totpsa-architecture.svg" alt="Alternativtext" width="800">
 
 *The picture shows one example: the TOTP secrets are exported from the Google Authenticator app on the
 smartphone with extract_otp_secrets, and the TOTP secrets adapter imports them into Dave's authenticator
