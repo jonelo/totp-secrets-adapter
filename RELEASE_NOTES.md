@@ -68,6 +68,21 @@
 - the passphrase of an existing data file is checked (read-only "list") before
   any record is added
 
+- support for Bitwarden: its unencrypted JSON and CSV exports can be read, and
+  import files in both formats can be written (--source and --target
+  bitwarden-json, bitwarden-csv); the same files can be imported into KeePassXC
+  2.7.7+ and Proton Pass (JSON). Only logins with a one-time password are used
+  (otpauth URI, steam://<secret> or a bare secret, which is normalized to upper
+  case); an encrypted export is rejected with a message. Name, notes, username,
+  password, URIs, folder, favorite, reprompt and archive date are kept between
+  the Bitwarden formats (the CSV is written with the header of the current
+  export, including the column archivedDate), and Apple Passwords entries keep their title, URL, username, password
+  and notes in both directions; custom fields are not kept (with a warning).
+  Bitwarden supports TOTP and Steam Guard, HOTP records are skipped with a
+  warning. README: Bitwarden, KeePassXC and Proton Pass in the tables of sources
+  and targets, new sections "Export the one-time passwords from Bitwarden" and
+  "Import into Bitwarden, KeePassXC and Proton Pass", help output updated
+
 ### bug fixes
 
 - the list of records shown at the end is now printed as the authenticator's

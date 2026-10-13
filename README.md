@@ -81,15 +81,17 @@ again. The *TOTP secrets adapter* reads and writes both formats.
 | [Roland's extract_otp_secrets](https://github.com/scito/extract_otp_secrets) | Python     | GPLv3       | JSON, CSV                           | `extract-otp-secrets-json`, `extract-otp-secrets-csv` |
 | Apple Passwords (macOS 15 and later)                                         | Swift      | proprietary | CSV                                 | `apple-passwords`                                    |
 | [2FAuth](https://docs.2fauth.app)                                            | PHP        | AGPLv3      | 2FAuth JSON, otpauth URIs           | `2fauth-json`, `otpauth-uris`                        |
+| [Bitwarden](https://bitwarden.com) Password Manager                          | TypeScript | GPLv3       | unencrypted JSON, CSV               | `bitwarden-json`, `bitwarden-csv`                    |
 
 `otpauth-uris` is a plain text file with one otpauth URI per line, as written by the otpauth export of
 2FAuth; Aegis, Ente Auth, FreeOTP+ and OTPClient import this format as well (see
 [Import into Aegis, Ente Auth, FreeOTP+ and OTPClient](#import-into-aegis-ente-auth-freeotp-and-otpclient)).
 
 If `--source` is not given, the format is detected automatically: for `.json` files the content decides
-(a list of records for extract_otp_secrets, an object with `"app": "2fauth_…"` for 2FAuth), `.txt` files
-are read as otpauth URIs, and for `.csv` files the first line decides (`name,secret,issuer,type,counter,url`
-for extract_otp_secrets, a header with `Title` and `OTPAuth` for Apple Passwords).
+(a list of records for extract_otp_secrets, an object with `"app": "2fauth_…"` for 2FAuth, an object with
+`"items"` for Bitwarden), `.txt` files are read as otpauth URIs, and for `.csv` files the first line decides
+(`name,secret,issuer,type,counter,url` for extract_otp_secrets, a header with `Title` and `OTPAuth` for
+Apple Passwords, a header with `type`, `name` and `login_totp` for Bitwarden).
 
 #### What target authenticators are supported?
 
@@ -102,16 +104,20 @@ for extract_otp_secrets, a header with `Title` and `OTPAuth` for Apple Passwords
 | [Ente Auth](https://github.com/ente-io/ente) (all platforms)                | Dart       | AGPLv3      | otpauth URIs                        | `otpauth-uris`                                       |
 | [FreeOTP+](https://github.com/helloworld1/FreeOTPPlus) (Android)            | Java       | Apache 2.0  | otpauth URIs                        | `otpauth-uris`                                       |
 | [OTPClient](https://github.com/paolostivanin/OTPClient) (Linux)             | C          | GPLv3       | otpauth URIs                        | `otpauth-uris`                                       |
+| [Bitwarden](https://bitwarden.com) Password Manager                         | TypeScript | GPLv3       | unencrypted JSON, CSV               | `bitwarden-json`, `bitwarden-csv`                    |
+| [KeePassXC](https://keepassxc.org) 2.7.7 and later                          | C++        | GPLv2/v3    | Bitwarden JSON                      | `bitwarden-json`                                     |
+| [Proton Pass](https://proton.me/pass)                                       | TypeScript | GPLv3       | Bitwarden JSON                      | `bitwarden-json`                                     |
 | the export formats of [extract_otp_secrets](https://github.com/scito/extract_otp_secrets) (for conversions) | Python | GPLv3 | JSON, CSV                 | `extract-otp-secrets-json`, `extract-otp-secrets-csv` |
 
 Time-based (TOTP) and counter-based (HOTP) one-time passwords are supported, including a non-default
-number of digits and period, and Steam Guard codes of 2FAuth. Some combinations cannot be represented
+number of digits and period, and Steam Guard codes of 2FAuth and Bitwarden. Some combinations cannot be represented
 by a target; such records are skipped with a warning:
 
 - Dave's authenticator only supports TOTP and HOTP with the SHA1 algorithm
 - Apple Passwords only supports TOTP
 - the formats of extract_otp_secrets support TOTP and HOTP, but not Steam Guard
 - the two 2FAuth formats support all of them
+- the two Bitwarden formats support TOTP and Steam Guard, but not HOTP
 
 
 ## How to install, export, import and use it
@@ -195,11 +201,13 @@ options:
   -v, --version         show program's version number and exit
   -s, --source FORMAT   format of the input files: apple-passwords, extract-
                         otp-secrets-json, extract-otp-secrets-csv, 2fauth-
-                        json, otpauth-uris (default: detected from the file
-                        extension and the CSV header)
+                        json, otpauth-uris, bitwarden-json, bitwarden-csv
+                        (default: detected from the file extension and the CSV
+                        header)
   -t, --target TARGET   where the secrets go: authenticator, apple-passwords,
                         extract-otp-secrets-json, extract-otp-secrets-csv,
-                        2fauth-json, otpauth-uris (default: authenticator)
+                        2fauth-json, otpauth-uris, bitwarden-json, bitwarden-
+                        csv (default: authenticator)
   -o, --output FILE     output file for the targets other than authenticator;
                         an existing file is never overwritten
   -O, --output-overwrite FILE
@@ -215,6 +223,7 @@ examples:
   totpsa.py --source apple-passwords --target extract-otp-secrets-json --output otp.json Passwords.csv
   totpsa.py -s apple-passwords -t extract-otp-secrets-csv -o otp.csv Passwords.csv
   totpsa.py -t 2fauth-json -O 2fauth_import.json 2fauth_export_otpauth.txt
+  totpsa.py -t bitwarden-json -o bitwarden.json Passwords.csv
 ```
 
 Before any secret is sent, the script checks that the selected program is a supported authenticator
@@ -260,6 +269,17 @@ one-time password (column `OTPAuth`) and ignores all others.
 
 Both files contain your secrets in plain text.
 
+#### Export the one-time passwords from Bitwarden
+
+- In the Bitwarden web app or desktop app, choose *Tools* > *Export vault* (web app) or *File* >
+  *Export vault* (desktop app)
+- Choose the file format `.json` or `.csv` (**not** `.json (Encrypted)`, the adapter cannot read it) and
+  confirm with your master password
+
+The file contains all your passwords in plain text. The adapter only uses the logins that have a
+one-time password (`login_totp` or `login.totp`, an otpauth URI, `steam://…` or a bare secret) and
+ignores all other items. Custom fields of these logins are not kept.
+
 ### Import of the TOTP secrets
 
 Import the secrets into the target authenticator:
@@ -275,11 +295,12 @@ or, if the authenticator is installed in a virtual environment that is not activ
 ```
 
 The same works with the CSV export of Apple Passwords or of extract_otp_secrets and with the exports
-of 2FAuth:
+of 2FAuth and Bitwarden:
 
 ```
 > python ./totpsa.py Passwords.csv
 > python ./totpsa.py 2fauth_export.json
+> python ./totpsa.py bitwarden_export.json
 ```
 
 Counter-based (HOTP) records are added with their counter (`authenticator add --counter`).
@@ -342,6 +363,30 @@ Then import `otp.txt` in the app:
 Delete `otp.txt` after the import. Steam Guard entries are written as `otpauth://steam/…` URIs; Aegis
 understands them, whether other apps do depends on the app.
 
+### Import into Bitwarden, KeePassXC and Proton Pass
+
+Create an import file in the format of Bitwarden, e.g. from the export of Apple Passwords:
+
+```
+> python ./totpsa.py --target bitwarden-json --output bitwarden.json Passwords.csv
+> python ./totpsa.py --target bitwarden-csv --output bitwarden.csv Passwords.csv
+```
+
+Then import the file:
+
+- Bitwarden: *Tools* > *Import data* (web app) or *File* > *Import data* (desktop app), file format
+  *Bitwarden (json)* or *Bitwarden (csv)*
+- KeePassXC: *Database* > *Import* > *Bitwarden*, choose `bitwarden.json`. The one-time password is
+  not shown as a field of the entry; right-click the entry and choose *TOTP* > *Show TOTP*. KeePassXC
+  does not understand `steam://`, so Steam Guard entries do not work there
+- Proton Pass: *Settings* > *Import*, choose the provider Bitwarden and `bitwarden.json`
+
+Delete the file after the import. Each record becomes a login with the one-time password in its TOTP
+field (otpauth URI; Steam Guard as `steam://<secret>`). Logins from Apple Passwords keep their title,
+URL, username, password and notes; logins from Bitwarden keep their name, notes, username, password,
+URIs, folder, favorite and reprompt flag and archive date. Bitwarden does not support counter-based (HOTP) one-time
+passwords, such records are skipped with a warning.
+
 ### Convert between formats
 
 With `--source` and `--target` every supported format can be converted into every other one, e.g.
@@ -352,8 +397,11 @@ from Apple Passwords to the JSON format of extract_otp_secrets:
 ```
 
 Entries of Apple Passwords are copied completely (Title, URL, Username, Password, Notes and OTPAuth)
-when the target is Apple Passwords again. The formats of extract_otp_secrets have no place for these
-columns; they are not written, and a warning tells you so. The otpauth URL of the source is copied
+when the target is Apple Passwords again, and they keep these columns in the Bitwarden formats. Logins of
+Bitwarden keep their name, notes, username, password, URIs, folder, favorite and reprompt flag and archive
+date between the two Bitwarden formats; in Apple Passwords, folder, favorite, reprompt, archive date and
+all URIs except the first are lost. The formats of extract_otp_secrets, 2FAuth and the otpauth URIs have no place for these
+fields; they are not written, and a warning tells you so. The otpauth URL of the source is copied
 unchanged, except for `otpauth-uris`: there the URI is the only place for the data, so a new one is
 created if the original does not contain everything (e.g. an Apple Passwords URI without a label, whose
 issuer comes from the title).

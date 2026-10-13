@@ -33,6 +33,7 @@ Supported sources:
 - Apple Passwords (csv)
 - https://docs.2fauth.app (json)
 - otpauth URIs, one per line (e.g. the otpauth export of 2FAuth)
+- https://bitwarden.com (unencrypted json, csv)
 
 Supported targets:
 - https://github.com/JeNeSuisPasDave/authenticator (cli+stdin)
@@ -50,6 +51,7 @@ import shutil
 import sys
 import subprocess
 import tempfile
+import uuid
 from collections import namedtuple
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -76,9 +78,12 @@ SOURCE_EXTRACT_JSON = "extract-otp-secrets-json"
 SOURCE_EXTRACT_CSV = "extract-otp-secrets-csv"
 SOURCE_2FAUTH_JSON = "2fauth-json"
 SOURCE_OTPAUTH = "otpauth-uris"
+SOURCE_BITWARDEN_JSON = "bitwarden-json"
+SOURCE_BITWARDEN_CSV = "bitwarden-csv"
 TARGET_AUTHENTICATOR = "authenticator"
+BITWARDEN_FORMATS = (SOURCE_BITWARDEN_JSON, SOURCE_BITWARDEN_CSV)
 SOURCES = (SOURCE_APPLE, SOURCE_EXTRACT_JSON, SOURCE_EXTRACT_CSV,
-           SOURCE_2FAUTH_JSON, SOURCE_OTPAUTH)
+           SOURCE_2FAUTH_JSON, SOURCE_OTPAUTH) + BITWARDEN_FORMATS
 TARGETS = (TARGET_AUTHENTICATOR,) + SOURCES
 
 EXTRACT_FIELDS = ("name", "secret", "issuer", "type", "counter", "url")
@@ -94,6 +99,18 @@ TWOFAUTH_TYPES = {"totp": "totp", "hotp": "hotp", "steamtotp": "steam"}
 TWOFAUTH_PASS_THROUGH = ("icon", "icon_mime", "icon_file", "legacy_uri")
 # 2FAuth only imports a text file if every line starts like this
 OTPAUTH_LINE = re.compile(r"^otpauth://(totp|hotp|steam)/", re.IGNORECASE)
+# the header of the current export; importers find the columns by their names
+BITWARDEN_FIELDS = ("folder", "favorite", "type", "name", "notes", "fields", "reprompt",
+                    "archivedDate",
+                    "login_uri", "login_username", "login_password", "login_totp")
+BITWARDEN_REQUIRED = ("type", "name", "login_totp")
+BITWARDEN_LOGIN = "login"       # value of the column "type" in the CSV format
+BITWARDEN_LOGIN_TYPE = 1        # value of "type" in the JSON format
+# the fields of a Bitwarden entry that are kept (OtpRecord.bitwarden)
+BITWARDEN_PASS_THROUGH = ("name", "notes", "username", "password", "uris",
+                          "folder", "favorite", "reprompt", "archived")
+# Bitwarden stores Steam Guard secrets as steam://<secret>
+STEAM_SCHEME = "steam://"
 
 OTP_TYPES = ("totp", "hotp", "steam")
 EXTRACT_TYPES = ("totp", "hotp")
@@ -106,6 +123,8 @@ SUPPORTED_TYPES = {
     SOURCE_EXTRACT_CSV: EXTRACT_TYPES,
     SOURCE_2FAUTH_JSON: OTP_TYPES,
     SOURCE_OTPAUTH: OTP_TYPES,
+    SOURCE_BITWARDEN_JSON: ("totp", "steam"),
+    SOURCE_BITWARDEN_CSV: ("totp", "steam"),
 }
 DEFAULT_DIGITS = 6
 STEAM_DIGITS = 5
@@ -137,6 +156,10 @@ class OtpRecord:
             None for other sources.
         twofauth: the fields TWOFAUTH_PASS_THROUGH of a 2FAuth entry, None for
             other sources.
+        bitwarden: the fields BITWARDEN_PASS_THROUGH of a Bitwarden entry in a
+            form that does not depend on CSV or JSON (uris is a list of str,
+            folder a str, favorite a bool, reprompt an int, archived the
+            archivedDate as str or None), None for other sources.
     '''
     issuer: str
     name: str
@@ -151,6 +174,7 @@ class OtpRecord:
     otpauth: Optional[str] = field(default=None, compare=False)
     apple: Optional[dict] = field(default=None, compare=False)
     twofauth: Optional[dict] = field(default=None, compare=False)
+    bitwarden: Optional[dict] = field(default=None, compare=False)
 
     @property
     def id(self):
@@ -187,7 +211,8 @@ def parse_args():
                "extract-otp-secrets-json --output otp.json Passwords.csv\n"
                "  %(prog)s -s apple-passwords -t extract-otp-secrets-csv "
                "-o otp.csv Passwords.csv\n"
-               "  %(prog)s -t 2fauth-json -O 2fauth_import.json 2fauth_export_otpauth.txt",
+               "  %(prog)s -t 2fauth-json -O 2fauth_import.json 2fauth_export_otpauth.txt\n"
+               "  %(prog)s -t bitwarden-json -o bitwarden.json Passwords.csv",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -567,10 +592,21 @@ def read_apple_passwords(secret_file, errors):
         records.append(record_from_otpauth(
             parts, fields["OTPAuth"], fields.get("Title") or "", fields.get("Username") or "",
             apple={key: fields.get(key) or "" for key in APPLE_PASS_THROUGH}))
+    report_without_otp(secret_file, without_otp)
+    return records
+
+
+def report_without_otp(secret_file, without_otp):
+    '''Prints how many entries of a file were skipped because they have no
+    one-time password.
+
+    Args:
+        secret_file: path of the file.
+        without_otp: number of skipped entries; nothing is printed for 0.
+    '''
     if without_otp:
         entries = "entry" if without_otp == 1 else "entries"
         print(f"{secret_file}: {without_otp} {entries} without a one-time password skipped")
-    return records
 
 
 def read_2fauth_json(secret_file, errors):
@@ -688,7 +724,8 @@ def record_from_otpauth(parts, otpauth, issuer_fallback="", name_fallback="", **
         issuer_fallback: issuer if the URL has neither an issuer parameter nor
             an issuer in its label.
         name_fallback: name if the URL has no account in its label.
-        **pass_through: further OtpRecord fields, i.e. apple or twofauth.
+        **pass_through: further OtpRecord fields, i.e. apple, twofauth or
+            bitwarden.
 
     Returns:
         OtpRecord.
@@ -701,21 +738,223 @@ def record_from_otpauth(parts, otpauth, issuer_fallback="", name_fallback="", **
         algorithm=parts["algorithm"], otpauth=otpauth, **pass_through)
 
 
+def parse_bitwarden_totp(value):
+    '''Splits the one-time password field of a Bitwarden entry into its parts.
+
+    Bitwarden accepts an otpauth URL, steam://<secret> for Steam Guard, or the
+    bare base32 secret of a TOTP with the default parameters. A bare secret
+    is normalized to upper case without blanks.
+
+    Args:
+        value: content of login_totp (CSV) or login.totp (JSON) as str.
+
+    Returns:
+        tuple (parts, otpauth): parts is a dict like the one parse_otpauth()
+        returns, otpauth is the value if it is an otpauth URL, None otherwise.
+
+    Raises:
+        InputError: the otpauth URL is invalid or the secret is empty.
+    '''
+    value = value.strip()
+    if value.lower().startswith("otpauth://"):
+        return parse_otpauth(value), value
+    otp_type = "totp"
+    if value.lower().startswith(STEAM_SCHEME):
+        otp_type = "steam"
+        value = value[len(STEAM_SCHEME):]
+    secret = "".join(value.split()).upper()
+    if not secret:
+        raise InputError("the one-time password has no secret")
+    return {"type": otp_type, "label_issuer": "", "account": "", "secret": secret,
+            "issuer": "", "counter": None, "digits": default_digits(otp_type),
+            "period": DEFAULT_PERIOD, "algorithm": DEFAULT_ALGORITHM}, None
+
+
+def record_from_bitwarden(entry, totp):
+    '''Creates a record from a Bitwarden entry.
+
+    The name and the username of the entry are the fallbacks for issuer and
+    name if the one-time password has none.
+
+    Args:
+        entry: dict with the keys of BITWARDEN_PASS_THROUGH, stored in
+            OtpRecord.bitwarden.
+        totp: the one-time password field (see parse_bitwarden_totp()).
+
+    Returns:
+        OtpRecord; otpauth is only set if totp is an otpauth URL.
+
+    Raises:
+        InputError: totp is invalid.
+    '''
+    parts, otpauth = parse_bitwarden_totp(totp)
+    return record_from_otpauth(parts, otpauth, entry["name"], entry["username"],
+                               bitwarden=entry)
+
+
+def warn_about_custom_fields(secret_file, with_fields):
+    '''Warns that the custom fields of Bitwarden entries are not kept.
+
+    Args:
+        secret_file: path of the file.
+        with_fields: number of entries with custom fields; nothing is printed
+            for 0.
+    '''
+    if with_fields:
+        entries = "entry is" if with_fields == 1 else "entries are"
+        print(f"Warning: {secret_file}: the custom fields of {with_fields} "
+              f"{entries} not kept.")
+
+
+def read_bitwarden_csv(secret_file, errors):
+    '''Reads the CSV export of Bitwarden (individual vault).
+
+    Entries that are no login or have no one-time password are skipped and
+    only counted in a message; custom fields are not kept.
+
+    Args:
+        secret_file: path of the file.
+        errors: list that a message "<file>: line <n> <problem>" is appended to
+            for each invalid one-time password; the other lines are still read.
+
+    Returns:
+        list of OtpRecord of the entries with a valid one-time password.
+
+    Raises:
+        InputError: the file is no valid CSV or lacks a column of
+            BITWARDEN_REQUIRED.
+        OSError: the file cannot be opened or read.
+    '''
+    header, rows = read_csv_rows(secret_file)
+    missing = [key for key in BITWARDEN_REQUIRED if key not in header]
+    if missing:
+        raise InputError(f"not a Bitwarden export (column {', '.join(missing)} missing)")
+    records = []
+    without_otp = with_fields = 0
+    for row_number, fields in enumerate(rows, start=2):
+        totp = (fields.get("login_totp") or "").strip()
+        if fields.get("type") != BITWARDEN_LOGIN or not totp:
+            without_otp += 1
+            continue
+        if (fields.get("fields") or "").strip():
+            with_fields += 1
+        entry = {
+            "name": fields.get("name") or "",
+            "notes": fields.get("notes") or "",
+            "username": fields.get("login_username") or "",
+            "password": fields.get("login_password") or "",
+            "uris": [uri.strip() for uri in (fields.get("login_uri") or "").split(",")
+                     if uri.strip()],
+            "folder": fields.get("folder") or "",
+            "favorite": fields.get("favorite") == "1",
+            "reprompt": 1 if fields.get("reprompt") == "1" else 0,
+            "archived": fields.get("archivedDate") or None,
+        }
+        try:
+            records.append(record_from_bitwarden(entry, totp))
+        except InputError as e:
+            errors.append(f"{secret_file}: line {row_number} {e}")
+    report_without_otp(secret_file, without_otp)
+    warn_about_custom_fields(secret_file, with_fields)
+    return records
+
+
+def is_bitwarden_export(data):
+    '''Tells whether decoded JSON data looks like a Bitwarden export.
+
+    Encrypted exports count as well, so that they are reported as such.
+
+    Args:
+        data: the decoded JSON value of a file.
+
+    Returns:
+        True if data is a dict with a list "items" or with "encrypted": true,
+        False otherwise.
+    '''
+    return isinstance(data, dict) and (isinstance(data.get("items"), list)
+                                       or data.get("encrypted") is True)
+
+
+def read_bitwarden_json(secret_file, errors):
+    '''Reads the unencrypted JSON export of Bitwarden.
+
+    Items that are no login or have no one-time password are skipped and only
+    counted in a message; custom fields are not kept.
+
+    Args:
+        secret_file: path of the file.
+        errors: list that a message "<file>: record #<n> <problem>" is appended
+            to for each invalid item; the other items are still read.
+
+    Returns:
+        list of OtpRecord of the items with a valid one-time password.
+
+    Raises:
+        InputError: the file is no valid JSON, an encrypted export or no
+            Bitwarden export (see is_bitwarden_export()).
+        OSError: the file cannot be opened or read.
+    '''
+    data = read_json(secret_file)
+    if not is_bitwarden_export(data):
+        raise InputError("not a Bitwarden export (an object with \"items\" is expected)")
+    if data.get("encrypted") is True:
+        raise InputError("an encrypted Bitwarden export cannot be read, "
+                         "please export the vault as .json without encryption")
+    folders = {folder.get("id"): folder.get("name") or ""
+               for folder in data.get("folders") or [] if isinstance(folder, dict)}
+    records = []
+    without_otp = with_fields = 0
+    for index, item in enumerate(data["items"], start=1):
+        if not isinstance(item, dict):
+            errors.append(f"{secret_file}: record #{index} is not an object")
+            continue
+        login = item.get("login")
+        totp = login.get("totp") if isinstance(login, dict) else None
+        if (item.get("type") != BITWARDEN_LOGIN_TYPE or not isinstance(totp, str)
+                or not totp.strip()):
+            without_otp += 1
+            continue
+        if item.get("fields"):
+            with_fields += 1
+        uris = login.get("uris")
+        entry = {
+            "name": str(item.get("name") or ""),
+            "notes": str(item.get("notes") or ""),
+            "username": str(login.get("username") or ""),
+            "password": str(login.get("password") or ""),
+            "uris": [str(uri["uri"]) for uri in uris if isinstance(uri, dict) and uri.get("uri")]
+                    if isinstance(uris, list) else [],
+            "folder": folders.get(item.get("folderId"), "") if item.get("folderId") else "",
+            "favorite": item.get("favorite") is True,
+            "reprompt": 1 if item.get("reprompt") == 1 else 0,
+            "archived": item.get("archivedDate") or None,
+        }
+        try:
+            records.append(record_from_bitwarden(entry, totp))
+        except InputError as e:
+            errors.append(f"{secret_file}: record #{index} {e}")
+    report_without_otp(secret_file, without_otp)
+    warn_about_custom_fields(secret_file, with_fields)
+    return records
+
+
 READERS = {
     SOURCE_APPLE: read_apple_passwords,
     SOURCE_EXTRACT_JSON: read_extract_json,
     SOURCE_EXTRACT_CSV: read_extract_csv,
     SOURCE_2FAUTH_JSON: read_2fauth_json,
     SOURCE_OTPAUTH: read_otpauth_uris,
+    SOURCE_BITWARDEN_JSON: read_bitwarden_json,
+    SOURCE_BITWARDEN_CSV: read_bitwarden_csv,
 }
 
 
 def detect_source(secret_file):
     '''Detects the format of a file by its extension and its content.
 
-    .json: a list is extract_otp_secrets, a 2FAuth export is 2FAuth; .txt:
-    otpauth URIs; .csv: the header decides between extract_otp_secrets and
-    Apple Passwords.
+    .json: a list is extract_otp_secrets, a 2FAuth export is 2FAuth, an
+    object with "items" is Bitwarden; .txt: otpauth URIs; .csv: the header
+    decides between extract_otp_secrets, Apple Passwords and Bitwarden.
 
     Args:
         secret_file: path of the file.
@@ -737,6 +976,8 @@ def detect_source(secret_file):
             return SOURCE_EXTRACT_JSON
         if is_2fauth_export(data):
             return SOURCE_2FAUTH_JSON
+        if is_bitwarden_export(data):
+            return SOURCE_BITWARDEN_JSON
     if extension == ".txt":
         return SOURCE_OTPAUTH
     if extension == ".csv":
@@ -745,6 +986,8 @@ def detect_source(secret_file):
             return SOURCE_EXTRACT_CSV
         if all(key in header for key in APPLE_REQUIRED):
             return SOURCE_APPLE
+        if all(key in header for key in BITWARDEN_REQUIRED):
+            return SOURCE_BITWARDEN_CSV
     raise InputError("cannot detect the format, please use --source")
 
 
@@ -926,8 +1169,9 @@ def write_extract_csv(records, f, layout):
 def write_apple_passwords(records, f, layout):
     '''Writes records as an Apple Passwords import file.
 
-    Records from Apple Passwords get their original columns back; for the
-    others Title is the issuer (or the name if there is no issuer) and
+    Records from Apple Passwords get their original columns back, records
+    from Bitwarden their name, first URI, username, password and notes; for
+    the others Title is the issuer (or the name if there is no issuer) and
     Username is the name.
 
     Args:
@@ -938,8 +1182,17 @@ def write_apple_passwords(records, f, layout):
     writer = csv.writer(f, lineterminator=layout.line_ending)
     writer.writerow(APPLE_FIELDS)
     for record in records:
-        apple = record.apple or {"Title": record.issuer or record.name,
-                                 "Username": record.name}
+        if record.apple:
+            apple = record.apple
+        elif record.bitwarden:
+            bitwarden = record.bitwarden
+            apple = {"Title": bitwarden["name"] or record.issuer or record.name,
+                     "URL": next(iter(bitwarden["uris"]), ""),
+                     "Username": bitwarden["username"],
+                     "Password": bitwarden["password"],
+                     "Notes": bitwarden["notes"]}
+        else:
+            apple = {"Title": record.issuer or record.name, "Username": record.name}
         writer.writerow([apple.get(key, "") for key in APPLE_PASS_THROUGH]
                         + [record.otpauth or build_otpauth(record)])
 
@@ -1036,12 +1289,122 @@ def write_otpauth_uris(records, f, layout):
         f.write(layout.line_ending)
 
 
+def bitwarden_entry(record):
+    '''Returns the Bitwarden fields of a record.
+
+    Records from Bitwarden get their fields back, records from Apple Passwords
+    their Title, URL, Username, Password and Notes; for the others the name is
+    the issuer (or the name if there is no issuer) and the username is the
+    name.
+
+    Args:
+        record: OtpRecord.
+
+    Returns:
+        dict with the keys of BITWARDEN_PASS_THROUGH; name is never empty.
+    '''
+    entry = {"name": "", "notes": "", "username": record.name, "password": "",
+             "uris": [], "folder": "", "favorite": False, "reprompt": 0, "archived": None}
+    if record.bitwarden:
+        entry.update(record.bitwarden)
+    elif record.apple:
+        entry.update(name=record.apple.get("Title", ""), notes=record.apple.get("Notes", ""),
+                     username=record.apple.get("Username", ""),
+                     password=record.apple.get("Password", ""),
+                     uris=[record.apple["URL"]] if record.apple.get("URL") else [])
+    entry["name"] = entry["name"] or record.issuer or record.name
+    return entry
+
+
+def bitwarden_totp(record):
+    '''Returns the one-time password field of a record for Bitwarden.
+
+    Args:
+        record: OtpRecord.
+
+    Returns:
+        steam://<secret> for Steam Guard; the bare secret for a record from
+        Bitwarden that had one; else the original otpauth URL, or a newly
+        built one if there is none.
+    '''
+    if record.type == "steam":
+        return f"{STEAM_SCHEME}{record.secret}"
+    if record.otpauth and record.otpauth.lower().startswith("otpauth://"):
+        return record.otpauth
+    # a Bitwarden record without otpauth URL had a bare secret
+    if record.bitwarden:
+        return record.secret
+    return build_otpauth(record)
+
+
+def write_bitwarden_csv(records, f, layout):
+    '''Writes records as a Bitwarden CSV import file (individual vault).
+
+    Args:
+        records: list of OtpRecord.
+        f: text file opened for writing with newline="".
+        layout: Layout of the first input file; its line ending is used.
+    '''
+    writer = csv.writer(f, lineterminator=layout.line_ending)
+    writer.writerow(BITWARDEN_FIELDS)
+    for record in records:
+        entry = bitwarden_entry(record)
+        writer.writerow([entry["folder"], "1" if entry["favorite"] else "", BITWARDEN_LOGIN,
+                         entry["name"], entry["notes"], "", entry["reprompt"],
+                         entry["archived"] or "",
+                         ",".join(entry["uris"]), entry["username"], entry["password"],
+                         bitwarden_totp(record)])
+
+
+def write_bitwarden_json(records, f, layout):
+    '''Writes records as an unencrypted Bitwarden JSON import file.
+
+    Every folder gets a new random id.
+
+    Args:
+        records: list of OtpRecord.
+        f: text file opened for writing.
+        layout: Layout of the first input file; unused, JSON always uses "\\n".
+    '''
+    folder_ids = {}
+    items = []
+    for record in records:
+        entry = bitwarden_entry(record)
+        if entry["folder"] and entry["folder"] not in folder_ids:
+            folder_ids[entry["folder"]] = str(uuid.uuid4())
+        items.append({
+            "folderId": folder_ids.get(entry["folder"]),
+            "type": BITWARDEN_LOGIN_TYPE,
+            "reprompt": entry["reprompt"],
+            "archivedDate": entry["archived"],
+            "name": entry["name"],
+            "notes": entry["notes"] or None,
+            "favorite": entry["favorite"],
+            "login": {
+                "uris": [{"match": None, "uri": uri} for uri in entry["uris"]],
+                "username": entry["username"] or None,
+                "password": entry["password"] or None,
+                "totp": bitwarden_totp(record),
+            },
+        })
+    export = {
+        "encrypted": False,
+        "folders": [{"id": folder_id, "name": name} for name, folder_id in folder_ids.items()],
+        "items": items,
+    }
+    # json.dump always uses "\n", JSON is not line-based
+    json.dump(export, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+
+
 WRITERS = {
     SOURCE_APPLE: write_apple_passwords,
     SOURCE_EXTRACT_JSON: write_extract_json,
     SOURCE_EXTRACT_CSV: write_extract_csv,
     SOURCE_2FAUTH_JSON: write_2fauth_json,
     SOURCE_OTPAUTH: write_otpauth_uris,
+    SOURCE_BITWARDEN_JSON: write_bitwarden_json,
+    SOURCE_BITWARDEN_CSV: write_bitwarden_csv,
 }
 
 
@@ -1066,14 +1429,14 @@ def supported_by(target, record):
 def warn_about_dropped_data(records, target):
     '''Warns if pass-through data of the records has no place in the target.
 
-    Covers the extra columns of Apple Passwords entries and the icons of
-    2FAuth entries.
+    Covers the extra columns of Apple Passwords entries, the icons of 2FAuth
+    entries and the fields of Bitwarden entries.
 
     Args:
         records: list of OtpRecord that are written.
         target: one of SOURCES (a file target).
     '''
-    if target != SOURCE_APPLE:
+    if target != SOURCE_APPLE and target not in BITWARDEN_FORMATS:
         from_apple = sum(1 for record in records if record.apple)
         if from_apple:
             print(f"Warning: the columns {', '.join(APPLE_PASS_THROUGH)} of "
@@ -1085,6 +1448,18 @@ def warn_about_dropped_data(records, target):
         if with_icon:
             print(f"Warning: the icons of {with_icon} 2FAuth entries are not part "
                   f"of {target} and are not written.")
+    from_bitwarden = [record.bitwarden for record in records if record.bitwarden]
+    if target == SOURCE_APPLE:
+        partly = sum(1 for entry in from_bitwarden
+                     if entry["folder"] or entry["favorite"] or entry["reprompt"]
+                     or entry["archived"] or len(entry["uris"]) > 1)
+        if partly:
+            print(f"Warning: the folder, favorite, reprompt, archive date and further URIs "
+                  f"of {partly} Bitwarden entries are not part of {target} and are not written.")
+    elif target not in BITWARDEN_FORMATS and from_bitwarden:
+        print(f"Warning: the name, notes, username, password and URIs of "
+              f"{len(from_bitwarden)} Bitwarden entries are not part of {target} "
+              f"and are not written.")
 
 
 def export_records(loaded, target, output, overwrite):
